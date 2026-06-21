@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-import os, gc, csv, bz2, math, zlib, lzma, time, hashlib, statistics
+import os, gc, csv, bz2, math, zlib, lzma, time, hashlib, statistics, shutil
 import lz4.frame, zstandard
 
 TAMANHO  = 10 * 1024 * 1024
-REPETICOES = 30
+REPETICOES = 5
 CSV_SAIDA  = "resultados/dados_finais.csv"
 
 COR = dict(
@@ -11,8 +11,8 @@ COR = dict(
     VERDE="\033[92m", AMAR="\033[93m", CIANO="\033[96m", AM_NEG="\033[1;93m",
 )
 
-_zc = zstandard.ZstdCompressor()
-_zd = zstandard.ZstdDecompressor()
+compressor_zstd = zstandard.ZstdCompressor()
+descompressor_zstd = zstandard.ZstdDecompressor()
 
 # (nome, comprimir, descomprimir, cor)
 MOTORES = [
@@ -21,7 +21,7 @@ MOTORES = [
     ("BZ2",  bz2.compress,       bz2.decompress,     COR["CIANO"]),
     ("LZMA", lzma.compress,      lzma.decompress,    COR["CIANO"]),
     ("LZ4",  lz4.frame.compress, lz4.frame.decompress, COR["VERDE"]),
-    ("ZSTD", _zc.compress,       _zd.decompress,     COR["VERDE"]),
+    ("ZSTD", compressor_zstd.compress,       descompressor_zstd.decompress,     COR["VERDE"]),
 ]
 
 
@@ -57,18 +57,22 @@ def fmt_velocidade(mbps: float, baseline: bool) -> str:
 
 
 def laudo(tam_orig: int, tam_final: int) -> str:
-    W = 24
+    largura_coluna = 34
     if tam_final > tam_orig:
         pct = ((tam_final / tam_orig) - 1.0) * 100
-        txt = f"⚠️ CRESCEU {pct:.0f}%"
-        cor, fim = COR["VERM"], COR["RST"]
-    elif tam_orig / tam_final < 1.02 if tam_final > 0 else True:
-        txt = "⚖️ Inalterado"
+        if round(pct) == 0:
+            txt = "⚖️ Sem alteração de tamanho"
+            cor, fim = COR["CINZA"], COR["RST"]
+        else:
+            txt = f"⚠️ CRESCEU {pct:.0f}%"
+            cor, fim = COR["VERM"], COR["RST"]
+    elif tam_final == tam_orig or (tam_final > 0 and tam_orig / tam_final < 1.02):
+        txt = "⚖️ Sem alteração de tamanho"
         cor, fim = COR["CINZA"], COR["RST"]
     else:
         txt = f"📉 {int(tam_orig / tam_final)} vezes menor"
         cor, fim = COR["VERDE"], COR["RST"]
-    return f"{cor}({txt}){fim}".ljust(W + len(cor) + len(fim))
+    return f"{cor}({txt}){fim}".ljust(largura_coluna + len(cor) + len(fim))
 
 
 def benchmark(nome_arq: str, dados: bytes) -> list[dict]:
@@ -77,9 +81,9 @@ def benchmark(nome_arq: str, dados: bytes) -> list[dict]:
     hash_ref = sha256(dados)
     resultados = []
 
-    R, N = COR["RST"], COR["NEG"]
+    RESETAR_COR, NEGRITO = COR["RST"], COR["NEG"]
     print(f"\n{'═'*100}")
-    print(f"  {N}📂 {nome_arq}  ({tam_mb:.1f} MiB)  SHA-256: {hash_ref[:16]}…{R}")
+    print(f"  {NEGRITO}📂 {nome_arq}  ({tam_mb:.1f} MiB)  SHA-256: {hash_ref[:16]}…{RESETAR_COR}")
     print(f"{'═'*100}")
     print(f"  {'Algoritmo':<10} │ {'Taxa':>12}  {'Laudo':<28} │ {'Compressão':>14} │ {'Descompressão':>14} │ {'CPU':>12}")
     print(f"{'─'*100}")
@@ -112,20 +116,20 @@ def benchmark(nome_arq: str, dados: bytes) -> list[dict]:
             if i == 0 and sha256(resultado) != hash_ref:
                 raise Exception(f"INTEGRIDADE FALHOU: {nome}")
 
-        med_c = statistics.median(t_comp)
-        med_d = statistics.median(t_decomp)
-        tp_c  = tam_mb / med_c if med_c > 0 else float('inf')
-        tp_d  = tam_mb / med_d if med_d > 0 else float('inf')
+        mediana_tempo_comp = statistics.median(t_comp)
+        mediana_tempo_decomp = statistics.median(t_decomp)
+        taxa_mbps_compressao  = tam_mb / mediana_tempo_comp if mediana_tempo_comp > 0 else float('inf')
+        taxa_mbps_descompressao  = tam_mb / mediana_tempo_decomp if mediana_tempo_decomp > 0 else float('inf')
         taxa  = tam_orig / tam_final if tam_final > 0 else 1.0
 
-        print(f"  {cor}{nome:<10}{R} │ {COR['AMAR']}{taxa:10.2f}:1{R}  {laudo(tam_orig, tam_final)} "
-              f"│ {fmt_velocidade(tp_c, is_none)} │ {fmt_velocidade(tp_d, is_none)} │ {fmt_tempo(med_c + med_d)}")
+        print(f"  {cor}{nome:<10}{RESETAR_COR} │ {COR['AMAR']}{taxa:10.2f}:1{RESETAR_COR}  {laudo(tam_orig, tam_final)} "
+              f"│ {fmt_velocidade(taxa_mbps_compressao, is_none)} │ {fmt_velocidade(taxa_mbps_descompressao, is_none)} │ {fmt_tempo(mediana_tempo_comp + mediana_tempo_decomp)}")
 
         resultados.append(dict(
             algoritmo=nome, arquivo=nome_arq,
             tamanho_original=tam_orig, tamanho_final=tam_final,
-            taxa=round(taxa, 4), throughput_mbps=round(tp_c, 2),
-            throughput_decomp_mbps=round(tp_d, 2),
+            taxa=round(taxa, 4), throughput_mbps=round(taxa_mbps_compressao, 2),
+            throughput_decomp_mbps=round(taxa_mbps_descompressao, 2),
         ))
 
     resumo(resultados, nome_arq)
@@ -133,20 +137,20 @@ def benchmark(nome_arq: str, dados: bytes) -> list[dict]:
 
 
 def resumo(resultados: list[dict], nome_arq: str) -> None:
-    cand = [r for r in resultados if r["algoritmo"] != "NONE"]
-    if not cand: return
+    algoritmos_validos = [r for r in resultados if r["algoritmo"] != "NONE"]
+    if not algoritmos_validos: return
 
-    menor  = min(cand, key=lambda r: r["tamanho_final"])
-    rapido = max(cand, key=lambda r: r["throughput_mbps"])
+    menor  = min(algoritmos_validos, key=lambda r: r["tamanho_final"])
+    rapido = max(algoritmos_validos, key=lambda r: r["throughput_mbps"])
     score  = lambda r: r["taxa"] * math.log10(r["throughput_mbps"]) if r["throughput_mbps"] > 0 else 0
-    equil  = max(cand, key=score)
+    melhor_equilibrio  = max(algoritmos_validos, key=score)
 
-    N, R = COR["NEG"], COR["RST"]
-    print(f"\n  {N}┌─ Resumo: {nome_arq} ─────────────────────────────┐{R}")
-    print(f"  │ 👑 Menor tamanho:    {COR['VERDE']}{menor['algoritmo']:<6}{R}  (taxa {menor['taxa']:.2f}:1)")
-    print(f"  │ ⚡ Mais rápido:      {COR['AMAR']}{rapido['algoritmo']:<6}{R}  ({rapido['throughput_mbps']:.1f} MB/s)")
-    print(f"  │ ⚖️  Melhor equilíbrio: {COR['CIANO']}{equil['algoritmo']:<6}{R}  (score {score(equil):.2f})")
-    print(f"  {N}└──────────────────────────────────────────────────┘{R}")
+    NEGRITO, RESETAR_COR = COR["NEG"], COR["RST"]
+    print(f"\n  {NEGRITO}┌─ Resumo: {nome_arq} ─────────────────────────────┐{RESETAR_COR}")
+    print(f"  │ 👑 Menor tamanho:    {COR['VERDE']}{menor['algoritmo']:<6}{RESETAR_COR}  (taxa {menor['taxa']:.2f}:1)")
+    print(f"  │ ⚡ Mais rápido:      {COR['AMAR']}{rapido['algoritmo']:<6}{RESETAR_COR}  ({rapido['throughput_mbps']:.1f} MB/s)")
+    print(f"  │ ⚖️  Melhor equilíbrio: {COR['CIANO']}{melhor_equilibrio['algoritmo']:<6}{RESETAR_COR}  (score {score(melhor_equilibrio):.2f})")
+    print(f"  {NEGRITO}└──────────────────────────────────────────────────┘{RESETAR_COR}")
 
 
 def exportar_csv(resultados: list[dict]) -> None:
@@ -161,11 +165,15 @@ def exportar_csv(resultados: list[dict]) -> None:
 
 
 def main() -> None:
-    N, R = COR["NEG"], COR["RST"]
-    print(f"\n{N}{'═'*100}{R}")
-    print(f"  {N}BENCHMARK DE COMPRESSÃO — Trade-off: Throughput (CPU) vs Taxa de Compressão (Espaço){R}")
+    if os.path.exists("resultados"):
+        shutil.rmtree("resultados")
+    os.makedirs("resultados", exist_ok=True)
+
+    NEGRITO, RESETAR_COR = COR["NEG"], COR["RST"]
+    print(f"\n{NEGRITO}{'═'*100}{RESETAR_COR}")
+    print(f"  {NEGRITO}BENCHMARK DE COMPRESSÃO — Trade-off: Throughput (CPU) vs Taxa de Compressão (Espaço){RESETAR_COR}")
     print(f"  Repetições: {REPETICOES}  |  Métrica: Mediana  |  Timer: process_time()  |  GC: isolado")
-    print(f"{N}{'═'*100}{R}")
+    print(f"{NEGRITO}{'═'*100}{RESETAR_COR}")
 
     dataset = gerar_dataset()
     todos = []
